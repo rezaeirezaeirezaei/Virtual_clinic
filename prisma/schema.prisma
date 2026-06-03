@@ -1,0 +1,297 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  PATIENT
+  DOCTOR
+  ADMIN
+}
+
+enum AppointmentStatus {
+  PENDING_PAYMENT
+  BOOKED
+  CANCELLED
+  COMPLETED
+}
+
+enum InvoiceStatus {
+  INITIATED
+  PAID
+  FAILED
+}
+
+// Core Users
+model User {
+  id        String   @id @default(cuid())
+  phone     String   @unique
+  role      UserRole @default(PATIENT)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  patientProfile   PatientProfile?
+  doctorProfile    DoctorProfile?
+  appointments     Appointment[]   @relation("DoctorAppointments")
+  encounters       Encounter[]
+  guidelines       GuidelineDocument[]
+  auditLogs        AuditLog[]
+  aiOutputs        AIOutput[]
+
+  @@index([phone])
+  @@index([role])
+}
+
+model PatientProfile {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  name          String
+  dateOfBirth   DateTime?
+  gender        String?
+  nationalId    String?
+  address       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  intakesFixed  IntakeFixed[]
+  intakesSmartQA IntakeSmartQA[]
+  attachments   Attachment[]
+  
+  @@index([userId])
+}
+
+model DoctorProfile {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  name        String
+  specialties String[] // JSON array of specialty IDs
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Specialty {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+
+  appointments Appointment[]
+
+  @@index([name])
+}
+
+// Appointments & Payments
+model Appointment {
+  id              String             @id @default(cuid())
+  patientId       String
+  doctorId        String
+  specialtyId     String
+  startAt         DateTime
+  endAt           DateTime
+  status          AppointmentStatus  @default(PENDING_PAYMENT)
+  visitRoomId     String?            // WebRTC room ID
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  patient         User               @relation("DoctorAppointments", fields: [patientId], references: [id], onDelete: Cascade)
+  doctor          User               @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  specialty       Specialty          @relation(fields: [specialtyId], references: [id])
+  invoice         Invoice?
+  encounter       Encounter?
+  intakesFixed    IntakeFixed[]
+  intakesSmartQA  IntakeSmartQA[]
+  attachments     Attachment[]
+  aiOutputs       AIOutput[]
+
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([specialtyId])
+  @@index([status])
+}
+
+model Invoice {
+  id          String        @id @default(cuid())
+  appointmentId String      @unique
+  amount      Float
+  currency    String        @default("IRR")
+  status      InvoiceStatus @default(INITIATED)
+  gatewayRef  String?       // Payment gateway reference
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  appointment Appointment   @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+// Patient Intakes
+model IntakeFixed {
+  id            String   @id @default(cuid())
+  patientId     String
+  appointmentId String?
+  dataJSON      Json     // Bates-style fixed fields
+  submittedAt   DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  patient       PatientProfile @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  appointment   Appointment?   @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  @@index([patientId])
+  @@index([appointmentId])
+}
+
+model IntakeSmartQA {
+  id            String   @id @default(cuid())
+  patientId     String
+  appointmentId String?
+  questionsJSON Json     // Array of questions with categories
+  answersJSON   Json?    // User responses
+  submittedAt   DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  patient       PatientProfile @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  appointment   Appointment?   @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  @@index([patientId])
+  @@index([appointmentId])
+}
+
+// Documents & Attachments
+model Attachment {
+  id            String   @id @default(cuid())
+  patientId     String
+  appointmentId String?
+  encounterId   String?
+  type          String   // "pdf", "image", "document", etc.
+  fileKey       String   // S3 key or local path
+  originalName  String
+  mimeType      String
+  size          Int
+  createdAt     DateTime @default(now())
+
+  patient       PatientProfile @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  appointment   Appointment?   @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  encounter     Encounter?     @relation(fields: [encounterId], references: [id], onDelete: SetNull)
+  extractedDoc  ExtractedDocument?
+
+  @@index([patientId])
+  @@index([appointmentId])
+  @@index([encounterId])
+}
+
+model ExtractedDocument {
+  id              String   @id @default(cuid())
+  attachmentId    String   @unique
+  extractedJSON   Json     // Structured extraction (diagnosis, medications, etc.)
+  confidenceJSON  Json?    // Confidence scores per field
+  createdAt       DateTime @default(now())
+
+  attachment      Attachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+
+  @@index([attachmentId])
+}
+
+// Doctor Encounters
+model Encounter {
+  id                  String   @id @default(cuid())
+  appointmentId       String   @unique
+  doctorId            String
+  subjective          String   // Chief complaint + history summary
+  objectiveManual     String?  // Optional manual physical exam notes
+  assessment          String   // Diagnosis and clinical impression
+  plan                String   // Management plan
+  prescriptionsJSON   Json?    // Array of prescriptions
+  ordersJSON          Json?    // Lab/imaging orders
+  followUp            String?  // Follow-up instructions
+  patientEducation    String?  // Patient education notes
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  appointment         Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  doctor              User        @relation(fields: [doctorId], references: [id])
+  attachments         Attachment[]
+  aiOutputs           AIOutput[]
+
+  @@index([appointmentId])
+  @@index([doctorId])
+}
+
+// Guidelines & RAG (Phase 6+)
+model GuidelineDocument {
+  id            String   @id @default(cuid())
+  doctorId      String
+  title         String
+  sourceType    String   // "UPLOAD", "LINK", "TEXT"
+  fileKey       String?  // S3 key for uploaded files
+  url           String?  // Link to guideline
+  rawText       String?  // Direct text input
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  doctor        User     @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  chunks        GuidelineChunk[]
+
+  @@index([doctorId])
+}
+
+model GuidelineChunk {
+  id                    String   @id @default(cuid())
+  guidelineDocumentId   String
+  chunkText             String
+  embeddingVector       Float[]  // pgvector support
+  metaJSON              Json?    // { page, section, heading }
+  createdAt             DateTime @default(now())
+
+  guidelineDocument     GuidelineDocument @relation(fields: [guidelineDocumentId], references: [id], onDelete: Cascade)
+
+  @@index([guidelineDocumentId])
+}
+
+// AI Outputs (Phase 7+)
+model AIOutput {
+  id              String   @id @default(cuid())
+  appointmentId   String?
+  encounterId     String?
+  doctorId        String
+  type            String   // "INTAKE_SUMMARY", "DOC_EXTRACTION", "CLINICAL_PLAN"
+  outputJSON      Json     // The AI-generated content
+  citationsJSON   Json?    // References to guidelines
+  createdAt       DateTime @default(now())
+
+  appointment     Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  encounter       Encounter?   @relation(fields: [encounterId], references: [id], onDelete: SetNull)
+  doctor          User         @relation(fields: [doctorId], references: [id])
+
+  @@index([appointmentId])
+  @@index([encounterId])
+  @@index([doctorId])
+  @@index([type])
+}
+
+// Audit Logs
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String
+  action    String   // "LOGIN", "CREATE_APPOINTMENT", etc.
+  entityType String?  // "Appointment", "Encounter", etc.
+  entityId  String?
+  metaJSON  Json?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
+}
